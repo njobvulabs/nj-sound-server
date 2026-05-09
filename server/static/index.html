@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Sound Bridge</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: #111;
+  color: #eee;
+  display: flex;
+  min-height: 100dvh;
+  align-items: center;
+  justify-content: center;
+}
+.card {
+  background: #1a1a2e;
+  border-radius: 20px;
+  padding: 32px;
+  width: 360px;
+  max-width: 94vw;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+}
+h1 {
+  text-align: center;
+  font-size: 24px;
+  margin-bottom: 24px;
+  color: #e94560;
+}
+label {
+  display: block;
+  font-size: 13px;
+  color: #888;
+  margin-bottom: 4px;
+  margin-top: 16px;
+}
+input {
+  width: 100%;
+  padding: 12px 16px;
+  background: #16213e;
+  border: 1px solid #333;
+  border-radius: 12px;
+  color: #eee;
+  font-size: 16px;
+  outline: none;
+  transition: border-color .2s;
+}
+input:focus { border-color: #e94560; }
+button {
+  width: 100%;
+  padding: 14px;
+  border: none;
+  border-radius: 12px;
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  margin-top: 24px;
+  transition: background .2s, opacity .2s;
+}
+button.connect {
+  background: #e94560;
+  color: #fff;
+}
+button.connect:hover { background: #d63851; }
+button.disconnect {
+  background: #333;
+  color: #e94560;
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.mic-row {
+  display: flex;
+  gap: 12px;
+  margin-top: 16px;
+}
+.mic-btn {
+  flex: 1;
+  padding: 12px;
+  font-size: 15px;
+  margin-top: 0;
+}
+.mic-btn.on {
+  background: #00c853;
+  color: #111;
+}
+.mic-btn.on:hover { background: #00b34a; }
+.mic-btn.off {
+  background: #555;
+  color: #aaa;
+}
+.mic-btn.off:hover { background: #444; }
+.mic-btn.hidden { display: none; }
+.status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 20px;
+  padding: 12px 16px;
+  background: #16213e;
+  border-radius: 12px;
+  font-size: 14px;
+}
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.dot.off { background: #555; }
+.dot.connecting { background: #f0a500; animation: pulse .8s infinite; }
+.dot.on { background: #00c853; }
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+.error {
+  color: #e94560;
+  font-size: 13px;
+  margin-top: 12px;
+  text-align: center;
+  min-height: 20px;
+}
+.volume {
+  display: flex;
+  gap: 16px;
+  margin-top: 16px;
+}
+.volume div {
+  flex: 1;
+  background: #16213e;
+  border-radius: 8px;
+  padding: 10px;
+  text-align: center;
+  font-size: 12px;
+}
+.volume .label { color: #888; }
+.volume .value { color: #00c853; font-weight: 600; font-size: 16px; }
+</style>
+</head>
+<body>
+
+<div class="card">
+  <h1>NJ Sound Server</h1>
+
+  <label for="host">Server IP</label>
+  <input id="host" type="text" placeholder="192.168.1.x">
+
+  <label for="port">Port</label>
+  <input id="port" type="number" placeholder="8765" value="8765">
+
+  <button id="btn" class="connect">Connect</button>
+
+  <div class="status">
+    <span class="dot off" id="dot"></span>
+    <span id="statusText">Disconnected</span>
+  </div>
+
+  <div class="error" id="error"></div>
+
+  <div class="volume">
+    <div>
+      <div class="label">Mic</div>
+      <div class="value" id="micLevel">-</div>
+    </div>
+    <div>
+      <div class="label">Speaker</div>
+      <div class="value" id="spkLevel">-</div>
+    </div>
+  </div>
+
+  <div class="mic-row">
+    <button id="micBtn" class="mic-btn on hidden">Mic ON</button>
+  </div>
+</div>
+
+<script>
+const FRAME_SIZE = 960;
+const SAMPLE_RATE = 48000;
+const JITTER_FRAMES = 10; // 200ms buffer before playback starts
+const FADE = new Float32Array(64);
+for (let i = 0; i < 64; i++) FADE[i] = 1 - i / 64;
+
+const hostInput = document.getElementById('host');
+const portInput = document.getElementById('port');
+const btn = document.getElementById('btn');
+const dot = document.getElementById('dot');
+const statusText = document.getElementById('statusText');
+const errorEl = document.getElementById('error');
+const micLevel = document.getElementById('micLevel');
+const spkLevel = document.getElementById('spkLevel');
+const micBtn = document.getElementById('micBtn');
+
+let ws = null;
+let audioCtx = null;
+let micStream = null;
+let micProcessor = null;
+let spkProcessor = null;
+let micBuffer = [];
+let playBuffer = [];
+let connected = false;
+let micEnabled = true;
+let isStereo = false;
+let spkReady = false;
+
+// Auto-fill host from page URL
+(function() {
+  const parts = location.hostname;
+  if (parts && parts !== 'localhost' && parts !== '127.0.0.1') {
+    hostInput.value = parts;
+  } else {
+    hostInput.value = '192.168.';
+  }
+})();
+
+function setStatus(state, msg) {
+  dot.className = 'dot ' + state;
+  statusText.textContent = msg;
+}
+
+function showError(msg) {
+  errorEl.textContent = msg;
+  setTimeout(() => { if (errorEl.textContent === msg) errorEl.textContent = ''; }, 5000);
+}
+
+function updateLevel(el, samples) {
+  if (!samples || samples.length === 0) { el.textContent = '-'; return; }
+  let sum = 0;
+  for (let i = 0; i < samples.length; i++) {
+    const s = samples[i];
+    sum += s < 0 ? -s : s;
+  }
+  const avg = sum / samples.length;
+  const db = Math.round(20 * Math.log10(Math.max(avg, 0.0001)));
+  el.textContent = db + ' dB';
+}
+
+function stopMic() {
+  if (micProcessor) {
+    micProcessor.disconnect();
+    micProcessor = null;
+  }
+  if (micStream) {
+    micStream.getTracks().forEach(t => t.stop());
+    micStream = null;
+  }
+  micBuffer = [];
+}
+
+function stopSpk() {
+  if (spkProcessor) {
+    spkProcessor.disconnect();
+    spkProcessor = null;
+  }
+  playBuffer = [];
+}
+
+async function startMic() {
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: { sampleRate: SAMPLE_RATE, channelCount: 1, echoCancellation: false, noiseSuppression: false }
+    });
+  } catch (e) {
+    if (e.name === 'NotAllowedError') {
+      if (!window.isSecureContext) {
+        showError('HTTPS required for microphone on Android. Use HTTPS or localhost.');
+      } else {
+        showError('Microphone blocked. Check browser site permissions & grant mic access.');
+      }
+    } else if (e.name === 'NotFoundError') {
+      showError('No microphone found on this device.');
+    } else {
+      showError('Microphone error: ' + e.message);
+    }
+    throw e;
+  }
+
+  const src = audioCtx.createMediaStreamSource(micStream);
+  micProcessor = audioCtx.createScriptProcessor(2048, 1, 1);
+
+  micProcessor.onaudioprocess = (e) => {
+    const input = e.inputBuffer.getChannelData(0);
+    updateLevel(micLevel, input);
+    for (let i = 0; i < input.length; i++) micBuffer.push(input[i]);
+
+    while (micBuffer.length >= FRAME_SIZE) {
+      const frame = micBuffer.splice(0, FRAME_SIZE);
+      const pcm = new Int16Array(FRAME_SIZE);
+      for (let i = 0; i < FRAME_SIZE; i++) {
+        const s = frame[i] * 32768;
+        pcm[i] = s < -32768 ? -32768 : s > 32767 ? 32767 : s;
+      }
+      if (ws && ws.readyState === WebSocket.OPEN && micEnabled) {
+        ws.send(pcm.buffer);
+      }
+    }
+  };
+
+  src.connect(micProcessor);
+}
+
+function startSpk() {
+  spkProcessor = audioCtx.createScriptProcessor(4096, 0, 2);
+
+  spkProcessor.onaudioprocess = (e) => {
+    const outL = e.outputBuffer.getChannelData(0);
+    const outR = e.outputBuffer.getChannelData(1);
+    updateLevel(spkLevel, outL);
+
+    if (!spkReady) {
+      if (playBuffer.length < JITTER_FRAMES) {
+        outL.fill(0);
+        outR.fill(0);
+        return;
+      }
+      spkReady = true;
+    }
+
+    if (playBuffer.length === 0) {
+      outL.fill(0);
+      outR.fill(0);
+      return;
+    }
+
+    let written = 0;
+    while (written < outL.length) {
+      if (playBuffer.length === 0) {
+        // smooth fade to silence over last 64 samples
+        const fadeStart = Math.max(written - 64, 0);
+        for (let i = 0; i < written - fadeStart; i++) {
+          outL[fadeStart + i] *= FADE[i];
+          outR[fadeStart + i] *= FADE[i];
+        }
+        outL.fill(0, written);
+        outR.fill(0, written);
+        break;
+      }
+      const chunk = playBuffer[0];
+      const remaining = outL.length - written;
+      const chunkFrames = isStereo ? chunk.length / 2 : chunk.length;
+      const toCopy = chunkFrames <= remaining ? chunkFrames : remaining;
+      for (let i = 0; i < toCopy; i++) {
+        if (isStereo) {
+          outL[written + i] = chunk[i * 2];
+          outR[written + i] = chunk[i * 2 + 1];
+        } else {
+          outL[written + i] = chunk[i];
+          outR[written + i] = chunk[i];
+        }
+      }
+      written += toCopy;
+      if (toCopy < chunkFrames) {
+        playBuffer[0] = chunk.subarray(isStereo ? toCopy * 2 : toCopy);
+      } else {
+        playBuffer.shift();
+      }
+    }
+  };
+
+  spkProcessor.connect(audioCtx.destination);
+}
+
+function cleanup() {
+  stopMic();
+  stopSpk();
+  if (audioCtx) {
+    audioCtx.close().catch(() => {});
+    audioCtx = null;
+  }
+}
+
+function connect() {
+  const host = hostInput.value.trim();
+  const port = parseInt(portInput.value) || 8765;
+  if (!host) { showError('Enter server IP'); return; }
+
+  setStatus('connecting', 'Connecting...');
+  btn.disabled = true;
+  btn.textContent = 'Connecting...';
+
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(proto + '//' + host + ':' + port);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = async () => {
+    connected = true;
+    setStatus('on', 'Connected');
+    btn.className = 'disconnect';
+    btn.textContent = 'Disconnect';
+    btn.disabled = false;
+
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') await audioCtx.resume();
+
+    try {
+      await startMic();
+      startSpk();
+      micEnabled = true;
+      micBtn.className = 'mic-btn on';
+      micBtn.textContent = 'Mic ON';
+    } catch (e) {
+      disconnect();
+    }
+  };
+
+  ws.onmessage = (event) => {
+    if (!(event.data instanceof ArrayBuffer)) return;
+    if (playBuffer.length >= 128) return;
+    const int16 = new Int16Array(event.data);
+    isStereo = int16.length === FRAME_SIZE * 2;
+    const float32 = new Float32Array(int16.length);
+    for (let i = 0; i < int16.length; i++) {
+      float32[i] = int16[i] / 32768;
+    }
+    playBuffer.push(float32);
+  };
+
+  ws.onclose = () => {
+    if (connected) {
+      showError('Connection lost');
+      disconnect();
+    }
+  };
+
+  ws.onerror = () => {
+    showError('Connection failed');
+    setStatus('off', 'Disconnected');
+    btn.className = 'connect';
+    btn.textContent = 'Connect';
+    btn.disabled = false;
+  };
+}
+
+function disconnect() {
+  connected = false;
+  micEnabled = true;
+  spkReady = false;
+  cleanup();
+  if (ws) {
+    ws.onclose = null;
+    ws.close();
+    ws = null;
+  }
+  setStatus('off', 'Disconnected');
+  btn.className = 'connect';
+  btn.textContent = 'Connect';
+  btn.disabled = false;
+  micBtn.className = 'mic-btn on hidden';
+  micBtn.textContent = 'Mic ON';
+  micLevel.textContent = '-';
+  spkLevel.textContent = '-';
+}
+
+btn.addEventListener('click', () => {
+  if (connected) disconnect();
+  else connect();
+});
+
+micBtn.addEventListener('click', () => {
+  micEnabled = !micEnabled;
+  micBtn.className = 'mic-btn ' + (micEnabled ? 'on' : 'off');
+  micBtn.textContent = micEnabled ? 'Mic ON' : 'Mic OFF';
+});
+</script>
+</body>
+</html>
