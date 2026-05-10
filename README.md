@@ -2,6 +2,10 @@
 
 Use your Android phone as a wireless speaker and microphone for your PC.
 
+<img width="894" height="753" alt="nj-sound-server" src="https://github.com/user-attachments/assets/0cb41da7-9e82-49e0-9c5a-898939cc5c71" />
+<img width="720" height="1600" alt="android-bridge" src="https://github.com/user-attachments/assets/908862e1-257e-4808-870c-c1cf8a773fb6" />
+
+
 ## How it works
 
 ```
